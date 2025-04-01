@@ -1,0 +1,112 @@
+-- 해지 상품 예측 쿼리: 일반해지(PROD_STAT_CD = 3100)
+WITH PREVIOUS_LOG AS (
+SELECT
+    DT
+  , REAL_OUT_CNT
+  , CNT_OUT
+  , IF(RATIO < 5.0, RATIO, 5.0) AS RATIO -- 실제 해지신청 상품건수 대비 해지상품 비율 5% 이하면 5%로 분류
+FROM (
+    SELECT
+        DT
+      , REAL_OUT_CNT
+      , CNT_OUT
+      , (CAST(REAL_OUT_CNT AS DOUBLE)/CNT_OUT) + 0.10 AS RATIO
+    FROM (
+        SELECT
+            F1.DT AS DT 
+          , F2.NORMAL_OUT_PROD_CNT AS REAL_OUT_CNT -- 실제 해지상품건수
+          , F1.CNT_OUT -- 해지신청 상품건수
+        FROM ( 
+            SELECT
+                DATE(T1.VLD_END_DATE AT TIME ZONE 'Asia/Seoul' + INTERVAL '1' DAY) AS DT
+              , COUNT(DISTINCT T1.BUY_NO) AS CNT_OUT 
+            FROM HADOOP_KENT.MELON_MA_STAT_PRODUCTION.F_PROD_USER_FXMT_DT T1
+            JOIN HADOOP_KENT.MELON_MA_STAT_PRODUCTION.D_PROD T2 ON (T1.PROD_ID = T2.PROD_ID)
+            JOIN ( /* 해지신청 상품 분류 */
+                SELECT
+                    BUY_NO
+                  , AUTO_BILL_STAUS_CODE
+                FROM (
+                    SELECT
+                        BUY_NO
+                      , FIRST_VALUE(AUTO_BILL_STAUS_CODE) OVER (PARTITION BY BUY_NO ORDER BY PROD_STAUS_SEQ DESC) AS AUTO_BILL_STAUS_CODE
+                    FROM HADOOP_KENT.MELON_ODS_COMMERCE_PRODUCTION.SPA_PROD_STAT_TBH_RO
+                    WHERE DATE(REG_DATE AT TIME ZONE 'Asia/Seoul') <= DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') - INTERVAL '30' DAY
+                    ) T11
+                WHERE AUTO_BILL_STAUS_CODE = '1Q0300'
+                GROUP BY 1, 2
+                ) T4
+            ON (T1.BUY_NO = T4.BUY_NO)
+            WHERE T1.LOG_DATE = CAST(DATE_FORMAT(DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') - INTERVAL '30' DAY, '%Y%m%d') AS VARCHAR(8))
+              AND T1.PF_YN = 1
+              AND T1.PROD_STAT_CD NOT IN (3401, 3901, 2200, 2100, 3900, 3902, 3903) /*자결당일해지, 일지정지해제(자결성공), 일시정지 -> 제외*/
+              AND T2.PROD_ATTR_CD NOT IN (10040, 10050)                 /*종량제외*/
+              AND T2.PROD_SELL_PRT_CD = 60000                           /*B2C*/
+              AND T2.PROD_PRT_CD = 20000
+              AND DATE(T1.VLD_STRT_DATE AT TIME ZONE 'Asia/Seoul') <= DATE(T1.VLD_END_DATE AT TIME ZONE 'Asia/Seoul')
+              AND DATE(VLD_END_DATE AT TIME ZONE 'Asia/Seoul' + INTERVAL '1' DAY) BETWEEN DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') - INTERVAL '31' DAY AND DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') + INTERVAL '31' DAY
+            GROUP BY
+                DATE(T1.VLD_END_DATE AT TIME ZONE 'Asia/Seoul' + INTERVAL '1' DAY)
+            ) F1
+        LEFT OUTER JOIN (
+            SELECT
+              T1.DT + INTERVAL '1' DAY AS DT
+            , SUM(T1.PROD_CNT) AS NORMAL_OUT_PROD_CNT
+            FROM HADOOP_KENT.MELON_MA_STAT_PRODUCTION.F_PROD_USER_FXMT_DT T1
+            JOIN HADOOP_KENT.MELON_MA_STAT_PRODUCTION.D_PROD T2 ON (T1.PROD_ID = T2.PROD_ID)
+            WHERE T1.LOG_DATE BETWEEN CAST(DATE_FORMAT(DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') - INTERVAL '60' DAY, '%Y%m%d') AS VARCHAR(8)) AND CAST(DATE_FORMAT(DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') - INTERVAL '1' DAY, '%Y%m%d') AS VARCHAR(8))
+              AND T2.PROD_SELL_PRT_CD = 60000
+              AND T1.PF_YN = 1
+              AND T2.PROD_ATTR_CD NOT IN (10040, 10050)
+              AND T1.PROD_STAT_CD = 3100
+              AND T2.PROD_PRT_CD = 20000
+            GROUP BY
+                T1.DT + INTERVAL '1' DAY
+            ) F2
+        ON (F1.DT = F2.DT)
+        ) TEMP1
+    ) TEMP2
+)
+SELECT
+    DT
+  , CNT_OUT
+  , CEIL(PRED_OUT_CNT) AS PRED_OUT_CNT
+FROM (
+    SELECT
+        F1.DT AS DT 
+      , F1.CNT_OUT
+      , F1.CNT_OUT * F2.RATIO AS PRED_OUT_CNT
+    FROM (
+        SELECT
+            DATE(T1.VLD_END_DATE AT TIME ZONE 'Asia/Seoul' + INTERVAL '1' DAY) AS DT
+          , COUNT(DISTINCT T1.BUY_NO) AS CNT_OUT
+        FROM HADOOP_KENT.MELON_MA_STAT_PRODUCTION.F_PROD_USER_FXMT_DT T1
+        JOIN HADOOP_KENT.MELON_MA_STAT_PRODUCTION.D_PROD T2 ON (T1.PROD_ID = T2.PROD_ID)
+        JOIN (
+            SELECT
+                BUY_NO
+              , AUTO_BILL_STAUS_CODE
+            FROM (
+                SELECT
+                    BUY_NO
+                  , FIRST_VALUE(AUTO_BILL_STAUS_CODE) OVER (PARTITION BY BUY_NO ORDER BY PROD_STAUS_SEQ DESC) AS AUTO_BILL_STAUS_CODE
+                FROM HADOOP_KENT.MELON_ODS_COMMERCE_PRODUCTION.SPA_PROD_STAT_TBH_RO
+                ) T11
+            WHERE AUTO_BILL_STAUS_CODE = '1Q0300'
+            GROUP BY 1, 2
+            ) T4
+        ON (T1.BUY_NO = T4.BUY_NO)
+        WHERE T1.LOG_DATE = CAST(DATE_FORMAT(DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') - INTERVAL '1' DAY, '%Y%m%d') AS VARCHAR(8))
+          AND T1.PF_YN = 1
+          AND T1.PROD_STAT_CD NOT IN (3401, 3901, 2200, 2100, 3900, 3902, 3903) /*자결당일해지, 일지정지해제(자결성공), 일시정지 -> 제외*/
+          AND T2.PROD_ATTR_CD NOT IN (10040, 10050)                 /*종량제외*/
+          AND T2.PROD_SELL_PRT_CD = 60000                           /*B2C*/
+          AND T2.PROD_PRT_CD = 20000
+          AND DATE(T1.VLD_STRT_DATE AT TIME ZONE 'Asia/Seoul') <= DATE(T1.VLD_END_DATE AT TIME ZONE 'Asia/Seoul')
+          AND DATE(VLD_END_DATE AT TIME ZONE 'Asia/Seoul' + INTERVAL '1' DAY) BETWEEN DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') + INTERVAL '1' DAY AND DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') + INTERVAL '30' DAY
+        GROUP BY DATE(T1.VLD_END_DATE AT TIME ZONE 'Asia/Seoul' + INTERVAL '1' DAY)
+        ) F1
+    LEFT OUTER JOIN PREVIOUS_LOG F2 ON (F1.DT = F2.DT + INTERVAL '30' DAY)
+) FINAL
+WHERE DT BETWEEN DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') + INTERVAL '1' DAY AND DATE(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Seoul') + INTERVAL '31' DAY
+--WHERE DT <= CURRENT_DATE + INTERVAL '14' DAY 
